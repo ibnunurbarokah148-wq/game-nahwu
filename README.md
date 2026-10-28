@@ -10,7 +10,8 @@ Dokumen kebutuhan lengkap ada di [PRD Game Kuis Tim Kartu.md](./PRD%20Game%20Kui
 - Countdown 3 detik sebelum pertandingan dimulai.
 - Fase baca soal 5 detik, lalu fase menjawab 5 detik.
 - POV pemain berupa kartu tangan pribadi (A–E), bukan daftar pilihan ganda.
-- Daftar tim dan rekan setim selalu terlihat di layar pemain.
+- Layar pemain terkunci satu layar penuh tanpa scroll saat bertanding.
+- Daftar tim, bracket, dan papan skor dibuka lewat tombol **Tim** tanpa meninggalkan arena.
 - Pembagian tim acak (3–5 pemain per tim) dan pembagian kartu A–E per tim.
 - Rebutan jawaban: kartu pertama yang diterima server yang dihitung, soal langsung terkunci.
 - Damage dengan bonus kecepatan dan pengali per soal.
@@ -115,7 +116,7 @@ Catatan: sesi host disimpan di `localStorage` (`host-token:<roomId>` dan `host-i
 1. Buka `http://localhost:3000` atau tautan `/join/KODE`.
 2. Masukkan kode room, nama panggilan, dan pilih avatar.
 3. Tunggu di lobby sampai host memulai turnamen.
-4. Setelah tim dibentuk, layar pemain menampilkan daftar rekan setim dan kartu yang dipegang (A–E).
+4. Setelah tim dibentuk, layar pemain menampilkan kartu yang dipegang (A–E). Tombol **Tim** membuka daftar rekan setim, bracket, dan papan skor.
 5. Saat host memulai, muncul countdown 3 detik. Setelah itu soal tampil.
 6. Fase pertama adalah waktu baca 5 detik. Kartu masih terkunci, jadi pemain bisa membaca soal dan kartunya.
 7. Fase kedua adalah waktu menjawab 5 detik. Tekan kartu milikmu; hanya kartu yang kamu pegang yang bisa ditekan.
@@ -135,6 +136,7 @@ Buka `/display/[roomId]`. Layar ini menampilkan kode room, daftar peserta, arena
 - Setiap pertandingan diawali countdown 3 detik sebelum soal pertama muncul.
 - Setiap soal punya dua fase: baca 5 detik, lalu jawab 5 detik. Jawaban hanya diterima pada fase menjawab.
 - Pemain hanya melihat dan menekan kartu yang dipegangnya, bukan seluruh pilihan A–E.
+- Layar permainan pemain tidak bisa di-scroll; kartu selalu berada di zona jempol dan info tim ada di panel modal.
 - Soal menerima satu jawaban pertama; setelah itu soal terkunci.
 - Damage dihitung dari `(damage dasar + bonus kecepatan) x pengali soal`.
 - Bonus kecepatan diberikan bila menjawab dalam 30% pertama durasi soal.

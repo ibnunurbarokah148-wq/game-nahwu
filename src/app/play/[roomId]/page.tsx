@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { Brand } from "@/components/brand";
-import { Bracket, DamagePopup, HpBar, Leaderboard, TeamPanel } from "@/components/game-widgets";
+import { Bracket, HpBar, Leaderboard, TeamPanel } from "@/components/game-widgets";
 import { CARD_LETTERS, type CardLetter, type RoomSnapshot } from "@/lib/game";
 import { getSocket } from "@/lib/socket";
 import { sfx, useRoomBgm } from "@/lib/sound";
@@ -16,6 +16,7 @@ export default function PlayPage() {
   const [remaining, setRemaining] = useState(0);
   const [error, setError] = useState("");
   const [submitted, setSubmitted] = useState(false);
+  const [teamModalOpen, setTeamModalOpen] = useState(false);
   const { muted, toggleMute } = useRoomBgm(room?.status);
   const lastFeedbackKey = useRef<string>("");
   const lastCountdownRef = useRef<number | null>(null);
@@ -132,6 +133,23 @@ export default function PlayPage() {
     }
   }, [room?.status, room?.championTeamId, team?.id]);
 
+  useEffect(() => {
+    if (!teamModalOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setTeamModalOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [teamModalOpen]);
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, []);
+
   function raiseCard(card: CardLetter) {
     if (
       !myMatch ||
@@ -174,8 +192,6 @@ export default function PlayPage() {
 
   const teamName = team?.name ?? "Belum ada tim";
   const opponent = room.teams.find((item) => myMatch?.teamIds.includes(item.id) && item.id !== player?.teamId);
-  const firstMatchTeam = room.teams.find((item) => item.id === myMatch?.teamIds[0]);
-  const secondMatchTeam = room.teams.find((item) => item.id === myMatch?.teamIds[1]);
   const feedback = myMatch?.feedback;
   const isMyFeedback = feedback?.playerId === playerId;
   const disconnectedTeammates = room.players.filter(
@@ -194,18 +210,23 @@ export default function PlayPage() {
   const phaseProgress = Math.max(0, Math.min(100, (remaining / Math.max(1, phaseTotal)) * 100));
 
   return (
-    <main className="shell game-wrap">
+    <main className="shell game-wrap play-shell">
       <header className="topbar">
         <Brand />
         <div className="btn-row">
           <button type="button" className="button secondary" onClick={toggleMute}>
-            {muted ? "Backsound: Mati" : "Backsound: Aktif"}
+            {muted ? "Audio mati" : "Audio aktif"}
           </button>
-          <span className="status-tag">ROOM {room.code}</span>
+          {room.teams.length > 0 && (
+            <button type="button" className="button secondary" onClick={() => setTeamModalOpen(true)}>
+              Tim{team ? ` · ${team.playerIds.length}` : ""}
+            </button>
+          )}
         </div>
       </header>
 
-      {room.status === "lobby" ? (
+      <div className="play-body">
+        {room.status === "lobby" ? (
         <section className="panel waiting">
           <span className="eyebrow">Sudah masuk sebagai {player.avatar} {player.name}</span>
           <h2>Menunggu host memulai</h2>
@@ -235,29 +256,23 @@ export default function PlayPage() {
             </div>
           )}
 
-          {myMatch && (
+          {myMatch && isParticipantInMatch && team && (
             <div className="score-strip">
               <div className="score-team">
-                <strong>
-                  {isParticipantInMatch ? `${team?.name} · ${player.name}` : (firstMatchTeam?.name ?? "Tim A")}
-                </strong>
-                <b>{myMatch.hp[isParticipantInMatch ? team!.id : (firstMatchTeam?.id ?? "")] ?? room.config.startingHp} HP</b>
+                <strong>{team.name} · {player.name}</strong>
+                <b>{myMatch.hp[team.id] ?? room.config.startingHp} HP</b>
                 <HpBar
-                  hp={myMatch.hp[isParticipantInMatch ? team!.id : (firstMatchTeam?.id ?? "")] ?? room.config.startingHp}
+                  hp={myMatch.hp[team.id] ?? room.config.startingHp}
                   maxHp={room.config.startingHp}
                   variant="green"
                 />
               </div>
-              <span className="round-mark">
-                {room.currentRound ? `R${room.currentRound}` : "VS"}
-              </span>
+              <span className="round-mark">R{room.currentRound ?? 1} · {room.code}</span>
               <div className="score-team">
-                <strong>
-                  {isParticipantInMatch ? (opponent?.name ?? "Tim lawan") : (secondMatchTeam?.name ?? "Tim B")}
-                </strong>
-                <b>{myMatch.hp[isParticipantInMatch ? (opponent?.id ?? "") : (secondMatchTeam?.id ?? "")] ?? room.config.startingHp} HP</b>
+                <strong>{opponent?.name ?? "Tim lawan"}</strong>
+                <b>{myMatch.hp[opponent?.id ?? ""] ?? room.config.startingHp} HP</b>
                 <HpBar
-                  hp={myMatch.hp[isParticipantInMatch ? (opponent?.id ?? "") : (secondMatchTeam?.id ?? "")] ?? room.config.startingHp}
+                  hp={myMatch.hp[opponent?.id ?? ""] ?? room.config.startingHp}
                   maxHp={room.config.startingHp}
                   variant="orange"
                 />
@@ -265,68 +280,45 @@ export default function PlayPage() {
             </div>
           )}
 
-          {team && (
-            <section className="my-team-strip" aria-label={`Anggota ${team.name}`}>
-              <strong>{team.name}</strong>
-              {team.playerIds.map((mateId) => {
-                const mate = room.players.find((candidate) => candidate.id === mateId);
-                if (!mate) return null;
-                return (
-                  <span
-                    key={mateId}
-                    className={`team-member-chip ${mate.id === player.id ? "self" : ""} ${
-                      mate.connected ? "" : "offline"
-                    }`}
-                  >
-                    <span className="avatar">{mate.avatar}</span>
-                    {mate.name}
-                    {mate.id === player.id && <span className="self-tag">Kamu</span>}
-                    {!mate.connected && <span className="dc-badge">DC</span>}
-                  </span>
-                );
-              })}
-            </section>
-          )}
-
           {hasByeThisRound && room.status === "running" && (
-            <section className="panel waiting" style={{ marginBottom: 16 }}>
+            <section className="panel waiting">
               <span className="eyebrow">Ronde {room.currentRound} · Bye</span>
               <h2>{teamName} mendapat Bye!</h2>
-              <p className="micro">Tim kamu otomatis lolos ke ronde berikutnya. Sambil menunggu, kamu bisa memantau jalannya pertandingan tim lain di bawah.</p>
+              <p className="micro">Tim kamu otomatis lolos ke ronde berikutnya. Buka tombol Tim untuk melihat bracket dan tim lain.</p>
             </section>
           )}
 
           {!isParticipantInMatch && !hasByeThisRound && room.status === "running" && (
-            <section className="panel waiting" style={{ marginBottom: 16 }}>
+            <section className="panel waiting">
               <span className="eyebrow">Mode Penonton · Ronde {room.currentRound}</span>
               <h2>Menonton Pertandingan</h2>
-              <p className="micro">Tim kamu sedang menunggu atau telah gugur di ronde sebelumnya.</p>
+              <p className="micro">Tim kamu sedang menunggu atau telah gugur. Buka tombol Tim untuk melihat bracket.</p>
             </section>
           )}
 
           {room.status === "finished" && (
-            <section className="panel waiting" style={{ marginBottom: 18 }}>
+            <section className="panel waiting">
               <span className="eyebrow">Turnamen Selesai</span>
               <h2>
                 {room.championTeamId === team?.id
                   ? "Tim kamu menang turnamen!"
                   : `Pemenang: ${room.teams.find((item) => item.id === room.championTeamId)?.name ?? "Tim Pemenang"}`}
               </h2>
-              {team && myMatch && (
+              {team && myMatch && isParticipantInMatch && (
                 <p className="micro">{teamName} · {myMatch.hp[team.id] ?? 0} HP tersisa di laga terakhir</p>
               )}
             </section>
           )}
 
-          {room.status === "running" && myMatch?.status === "finished" && (
-            <section className="panel waiting" style={{ marginBottom: 18 }}>
+          {room.status === "running" && isParticipantInMatch && myMatch?.status === "finished" && (
+            <section className="panel waiting">
               <span className="eyebrow">Pertandingan Ronde {room.currentRound} Selesai</span>
               <h2>{myMatch.winnerTeamId === team?.id ? "Tim kamu menang ronde ini!" : "Pertandingan berakhir"}</h2>
               <p className="micro">Menunggu pertandingan lain di ronde ini selesai untuk lanjut ke ronde berikutnya…</p>
             </section>
           )}
 
-          {room.status === "running" && myMatch && myMatch.status !== "finished" && question && (
+          {room.status === "running" && isParticipantInMatch && myMatch && myMatch.status !== "finished" && question && (
             <section className={`panel question-panel arena-stage ${myMatch.status === "paused" ? "paused" : ""}`}>
               <div className={`phase-banner ${myMatch.status === "paused" ? "paused" : phase ?? ""}`}>
                 <span>
@@ -363,14 +355,17 @@ export default function PlayPage() {
 
                 <h1 className="question-text" dir="auto">{question.text}</h1>
 
-                {isParticipantInMatch ? (
-                  <div className={`hand-zone ${phase ?? ""}`}>
+                <div className={`hand-zone ${phase ?? ""}`}>
                     <div className="hand-label">
                       <span>Kartu Kamu</span>
                       <span>{sortedCards.length} kartu</span>
                     </div>
 
-                    <div className="hand-cards">
+                    <div
+                      className={`hand-cards ${
+                        sortedCards.length >= 3 ? "three" : sortedCards.length === 2 ? "two" : "one"
+                      }`}
+                    >
                       {sortedCards.map((card) => {
                         const optionText = question.options[CARD_LETTERS.indexOf(card)];
                         const playable = myMatch.status === "question" && phase === "answering" && !submitted;
@@ -410,12 +405,7 @@ export default function PlayPage() {
                         <span className="dc-badge">Bot-slot aktif</span> Kartu rekan yang terputus sedang dioper ke tim.
                       </p>
                     )}
-                  </div>
-                ) : (
-                  <p className="spectator-note">
-                    Kamu sedang menonton pertandingan ini. Kartu hanya bisa diangkat oleh anggota tim yang bertanding.
-                  </p>
-                )}
+                </div>
               </div>
 
               {feedback && (
@@ -429,7 +419,6 @@ export default function PlayPage() {
                       }`}
                 </div>
               )}
-              <DamagePopup feedback={feedback} teams={room.teams} />
 
               {myMatch.status === "locked" && !feedback && (
                 <div className="feedback" role="status">Soal ditutup tanpa damage.</div>
@@ -451,10 +440,34 @@ export default function PlayPage() {
             </section>
           )}
 
-          {room.teams.length > 0 && (
-            <section className="panel" style={{ marginTop: 18 }}>
-              <h2>Daftar Tim</h2>
-              <p className="panel-sub">Tim kamu ditandai hijau. Kartu pemain yang terputus otomatis dioper ke rekan setim.</p>
+        </>
+      )}
+      </div>
+
+      {teamModalOpen && (
+        <div
+          className="team-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setTeamModalOpen(false);
+          }}
+        >
+          <section className="team-modal" role="dialog" aria-modal="true" aria-labelledby="team-modal-title">
+            <header className="team-modal-head">
+              <div>
+                <span className="eyebrow">Ronde {room.currentRound ?? 1} · {room.code}</span>
+                <h2 id="team-modal-title">Tim & Turnamen</h2>
+              </div>
+              <button
+                type="button"
+                className="team-modal-close"
+                onClick={() => setTeamModalOpen(false)}
+                aria-label="Tutup daftar tim"
+              >
+                ×
+              </button>
+            </header>
+            <div className="team-modal-body">
               <TeamPanel
                 teams={room.teams}
                 players={room.players}
@@ -462,29 +475,26 @@ export default function PlayPage() {
                 highlightTeamId={team?.id}
                 selfPlayerId={player.id}
               />
-            </section>
-          )}
-
-          {room.bracket && room.bracket.length > 0 && (
-            <section className="panel" style={{ marginTop: 18 }}>
-              <h2>Bracket Turnamen</h2>
-              <Bracket
-                bracket={room.bracket}
-                teams={room.teams}
-                maxHp={room.config.startingHp}
-                championTeamId={room.championTeamId}
-              />
-            </section>
-          )}
-
-          {room.leaderboard && room.leaderboard.length > 0 && (
-            <section className="panel" style={{ marginTop: 18 }}>
-              <h2>Leaderboard MVP Pemain</h2>
-              <p className="panel-sub">Peringkat berdasarkan kontribusi damage dan jawaban benar.</p>
-              <Leaderboard entries={room.leaderboard} />
-            </section>
-          )}
-        </>
+              {room.bracket && room.bracket.length > 0 && (
+                <section className="team-modal-section">
+                  <h3>Bracket Turnamen</h3>
+                  <Bracket
+                    bracket={room.bracket}
+                    teams={room.teams}
+                    maxHp={room.config.startingHp}
+                    championTeamId={room.championTeamId}
+                  />
+                </section>
+              )}
+              {room.leaderboard && room.leaderboard.length > 0 && (
+                <section className="team-modal-section">
+                  <h3>Papan Skor</h3>
+                  <Leaderboard entries={room.leaderboard} />
+                </section>
+              )}
+            </div>
+          </section>
+        </div>
       )}
     </main>
   );
