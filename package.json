@@ -1,0 +1,40 @@
+{
+  "name": "game-kuis-tim-kartu",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:web\" \"npm:dev:server\"",
+    "dev:web": "next dev",
+    "dev:server": "tsx watch server/index.ts",
+    "build": "next build",
+    "start": "concurrently -k \"npm:start:web\" \"npm:start:server\"",
+    "start:web": "next start",
+    "start:server": "tsx server/index.ts",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "simulate": "tsx scripts/simulate-bots.ts"
+  },
+  "dependencies": {
+    "next": "15.5.27",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1",
+    "zod": "^4.0.0"
+  },
+  "overrides": {
+    "postcss": "8.5.29"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "concurrently": "^9.2.0",
+    "eslint": "^9.30.0",
+    "eslint-config-next": "^15.5.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}
