@@ -1,12 +1,21 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { Brand } from "@/components/brand";
-import { Bracket, HpBar, Leaderboard, TeamPanel } from "@/components/game-widgets";
+import { Bracket, DamagePopup, HpBar, Leaderboard, TeamPanel } from "@/components/game-widgets";
 import { CARD_LETTERS, type CardLetter, type RoomSnapshot } from "@/lib/game";
 import { getSocket } from "@/lib/socket";
 import { sfx, useRoomBgm } from "@/lib/sound";
+
+const PLAYER_CONFETTI = Array.from({ length: 12 }, (_, index) => ({
+  id: index,
+  left: `${8 + ((index * 23) % 84)}%`,
+  delay: `${(index % 5) * 0.25}s`,
+  duration: `${2.5 + (index % 3) * 0.45}s`,
+  color: ["#1f704b", "#d8f36a", "#f3b74d", "#bc4a3e"][index % 4],
+}));
 
 export default function PlayPage() {
   const { roomId } = useParams<{ roomId: string }>();
@@ -17,10 +26,12 @@ export default function PlayPage() {
   const [error, setError] = useState("");
   const [submitted, setSubmitted] = useState(false);
   const [teamModalOpen, setTeamModalOpen] = useState(false);
+  const [kickedMessage, setKickedMessage] = useState("");
   const { muted, toggleMute } = useRoomBgm(room?.status);
   const lastFeedbackKey = useRef<string>("");
   const lastCountdownRef = useRef<number | null>(null);
   const [countdown, setCountdown] = useState<number | null>(null);
+  const [spectateCountdown, setSpectateCountdown] = useState<number | null>(null);
   const playerId = typeof window !== "undefined" ? localStorage.getItem(`player-id:${roomId}`) : null;
 
   useEffect(() => {
@@ -33,21 +44,31 @@ export default function PlayPage() {
       if (snapshot.id === roomId) setRoom(snapshot);
     };
     const receiveCards = (newCards: CardLetter[]) => setCards(newCards);
+    const onKicked = (message: string) => {
+      localStorage.removeItem(`player-id:${roomId}`);
+      localStorage.removeItem(`player-token-room:${roomId}`);
+      setKickedMessage(message || "Kamu telah dikeluarkan dari room oleh host.");
+      setError(message || "Kamu telah dikeluarkan dari room oleh host.");
+    };
     const token = localStorage.getItem(`player-token-room:${roomId}`);
     const subscribe = () => {
       if (token) {
         socket.emit("room:subscribe", { roomId, playerId, token }, (result) => {
           if (result.error) setError(result.error);
         });
+      } else {
+        setError("Sesi pemain tidak ditemukan.");
       }
     };
     socket.on("room:update", update);
     socket.on("player:cards", receiveCards);
+    socket.on("player:kicked", onKicked);
     socket.on("connect", subscribe);
     if (socket.connected) subscribe();
     return () => {
       socket.off("room:update", update);
       socket.off("player:cards", receiveCards);
+      socket.off("player:kicked", onKicked);
       socket.off("connect", subscribe);
     };
   }, [playerId, roomId, router]);
@@ -67,7 +88,17 @@ export default function PlayPage() {
   const isParticipantInMatch = Boolean(team && myMatch?.teamIds.includes(team.id));
   const currentRoundEntry = room?.bracket?.find((entry) => entry.round === room.currentRound);
   const hasByeThisRound = Boolean(team && currentRoundEntry?.byeTeamId === team.id);
+  const spectatedMatch = useMemo(() => {
+    if (!room) return undefined;
+    return room.matches?.find((candidate) => candidate.status !== "finished") ?? room.matches?.[0] ?? room.match;
+  }, [room]);
+  const isSpectatingLive =
+    room?.status === "running" &&
+    (!isParticipantInMatch || hasByeThisRound || myMatch?.status === "finished");
+  const activeFeedMatch = isSpectatingLive ? spectatedMatch : myMatch;
+  const activeFeedPhase = activeFeedMatch?.phase;
   const question = myMatch?.question;
+  const activeFeedQuestion = activeFeedMatch?.question;
   const sortedCards = useMemo(
     () => [...cards].sort((a, b) => CARD_LETTERS.indexOf(a) - CARD_LETTERS.indexOf(b)),
     [cards]
@@ -87,6 +118,18 @@ export default function PlayPage() {
   }, [phase, myMatch?.countdownEndsAt]);
 
   useEffect(() => {
+    if (!isSpectatingLive || spectatedMatch?.phase !== "countdown" || !spectatedMatch?.countdownEndsAt) {
+      setSpectateCountdown(null);
+      return;
+    }
+    const tick = () =>
+      setSpectateCountdown(Math.max(0, Math.ceil((spectatedMatch.countdownEndsAt! - Date.now()) / 1000)));
+    tick();
+    const interval = setInterval(tick, 100);
+    return () => clearInterval(interval);
+  }, [isSpectatingLive, spectatedMatch?.phase, spectatedMatch?.countdownEndsAt]);
+
+  useEffect(() => {
     if (countdown === null || countdown <= 0) return;
     if (lastCountdownRef.current === countdown) return;
     lastCountdownRef.current = countdown;
@@ -94,23 +137,24 @@ export default function PlayPage() {
   }, [countdown]);
 
   useEffect(() => {
-    if (!question) {
+    if (!activeFeedQuestion) {
       setRemaining(0);
       return;
     }
-    if (myMatch?.status === "paused" && question.pausedRemainingMs) {
-      setRemaining(Math.max(0, Math.ceil(question.pausedRemainingMs / 1000)));
+    if (activeFeedMatch?.status === "paused" && activeFeedQuestion.pausedRemainingMs) {
+      setRemaining(Math.max(0, Math.ceil(activeFeedQuestion.pausedRemainingMs / 1000)));
       return;
     }
-    const target = phase === "reading" ? question.readEndsAt : question.endsAt;
+    const target = activeFeedPhase === "reading" ? activeFeedQuestion.readEndsAt : activeFeedQuestion.endsAt;
     const refresh = () => setRemaining(Math.max(0, Math.ceil((target - Date.now()) / 1000)));
     refresh();
-    const interval = setInterval(refresh, 250);
+    const interval = setInterval(refresh, 200);
     return () => clearInterval(interval);
-  }, [question, myMatch?.status, phase]);
+  }, [activeFeedQuestion, activeFeedMatch?.status, activeFeedPhase]);
 
   useEffect(() => {
     setSubmitted(myMatch?.status !== "question" || phase !== "answering");
+    setError("");
   }, [myMatch?.id, myMatch?.questionNumber, myMatch?.status, phase]);
 
   useEffect(() => {
@@ -178,13 +222,18 @@ export default function PlayPage() {
     if (navigator.vibrate) navigator.vibrate(25);
   }
 
-  if (!room || !player) {
+  if (kickedMessage || !room || !player) {
     return (
       <main className="shell">
         <header className="topbar"><Brand /></header>
         <div className="panel waiting">
-          <h2>Menghubungkan ke room…</h2>
-          {error && <p role="alert" className="error">{error}</p>}
+          <h2>{kickedMessage ? "Kamu dikeluarkan dari room" : "Menghubungkan ke room…"}</h2>
+          {(error || kickedMessage) && <p role="alert" className="error">{kickedMessage || error}</p>}
+          {(error || kickedMessage) && (
+            <div style={{ marginTop: 18 }}>
+              <Link className="button secondary" href="/">Kembali ke Beranda</Link>
+            </div>
+          )}
         </div>
       </main>
     );
@@ -208,6 +257,20 @@ export default function PlayPage() {
       : String(countdown);
   const phaseTotal = phase === "reading" ? room.config.readingSeconds : room.config.questionSeconds;
   const phaseProgress = Math.max(0, Math.min(100, (remaining / Math.max(1, phaseTotal)) * 100));
+  const specPhaseTotal =
+    activeFeedPhase === "reading" ? room.config.readingSeconds : room.config.questionSeconds;
+  const specProgress = Math.max(0, Math.min(100, (remaining / Math.max(1, specPhaseTotal)) * 100));
+  const myRank = (room.leaderboard ?? []).findIndex((entry) => entry.playerId === player.id) + 1;
+  const myStats = player.stats ?? {
+    correctAnswers: 0,
+    wrongAnswers: 0,
+    damageDealt: 0,
+    selfDamage: 0,
+    totalResponseMs: 0,
+  };
+  const myAnsweredCount = myStats.correctAnswers + myStats.wrongAnswers;
+  const myAvgSec =
+    myAnsweredCount > 0 ? (myStats.totalResponseMs / myAnsweredCount / 1000).toFixed(1) : "—";
 
   return (
     <main className="shell game-wrap play-shell">
@@ -280,41 +343,224 @@ export default function PlayPage() {
             </div>
           )}
 
-          {hasByeThisRound && room.status === "running" && (
-            <section className="panel waiting">
-              <span className="eyebrow">Ronde {room.currentRound} · Bye</span>
-              <h2>{teamName} mendapat Bye!</h2>
-              <p className="micro">Tim kamu otomatis lolos ke ronde berikutnya. Buka tombol Tim untuk melihat bracket dan tim lain.</p>
-            </section>
-          )}
+          {isSpectatingLive && (
+            <section className="panel player-spectator-stage">
+              <div className="spectator-status-ribbon">
+                <div>
+                  <span className="live-pill">
+                    <span className="live-dot" />
+                    {hasByeThisRound
+                      ? `BYE RONDE ${room.currentRound ?? 1}`
+                      : isParticipantInMatch && myMatch?.status === "finished"
+                      ? myMatch.winnerTeamId === team?.id
+                        ? "MENANG RONDE INI"
+                        : "LAGA SELESAI"
+                      : "MODE PENONTON LIVE"}
+                  </span>
+                  <p className="micro" style={{ margin: "4px 0 0" }}>
+                    {hasByeThisRound
+                      ? `${teamName} lolos otomatis ke ronde berikut.`
+                      : isParticipantInMatch && myMatch?.status === "finished"
+                      ? "Menunggu pertandingan paralel lain selesai…"
+                      : "Tim kamu sedang menonton pertarungan langsung."}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="button secondary"
+                  onClick={() => setTeamModalOpen(true)}
+                >
+                  Bracket & Skor
+                </button>
+              </div>
 
-          {!isParticipantInMatch && !hasByeThisRound && room.status === "running" && (
-            <section className="panel waiting">
-              <span className="eyebrow">Mode Penonton · Ronde {room.currentRound}</span>
-              <h2>Menonton Pertandingan</h2>
-              <p className="micro">Tim kamu sedang menunggu atau telah gugur. Buka tombol Tim untuk melihat bracket.</p>
-            </section>
-          )}
+              {spectatedMatch && spectatedMatch.status !== "finished" ? (
+                <div className="spectator-feed-box">
+                  {(() => {
+                    const [specAId, specBId] = spectatedMatch.teamIds;
+                    const specTeamA = room.teams.find((t) => t.id === specAId);
+                    const specTeamB = room.teams.find((t) => t.id === specBId);
+                    const specFeedback = spectatedMatch.feedback;
+                    const specHitA = specFeedback?.targetTeamId === specAId;
+                    const specHitB = specFeedback?.targetTeamId === specBId;
+                    const specHitKey = specFeedback
+                      ? `${spectatedMatch.id}-${spectatedMatch.questionNumber}-${specFeedback.card}`
+                      : "none";
+                    const specCountdownText =
+                      spectatedMatch.status === "paused"
+                        ? "PAUSE"
+                        : spectateCountdown === null
+                        ? "3"
+                        : spectateCountdown <= 0
+                        ? "MULAI!"
+                        : String(spectateCountdown);
 
-          {room.status === "finished" && (
-            <section className="panel waiting">
-              <span className="eyebrow">Turnamen Selesai</span>
-              <h2>
-                {room.championTeamId === team?.id
-                  ? "Tim kamu menang turnamen!"
-                  : `Pemenang: ${room.teams.find((item) => item.id === room.championTeamId)?.name ?? "Tim Pemenang"}`}
-              </h2>
-              {team && myMatch && isParticipantInMatch && (
-                <p className="micro">{teamName} · {myMatch.hp[team.id] ?? 0} HP tersisa di laga terakhir</p>
+                    return (
+                      <>
+                        <div className="score-strip">
+                          <div
+                            key={specHitA ? `sA-${specHitKey}` : "sA-idle"}
+                            className={`score-team score-team-relative ${specHitA ? "damage-hit-shake" : ""}`}
+                          >
+                            <strong>{specTeamA?.name ?? "Tim A"}</strong>
+                            <b>{spectatedMatch.hp[specAId] ?? room.config.startingHp} HP</b>
+                            <HpBar
+                              hp={spectatedMatch.hp[specAId] ?? room.config.startingHp}
+                              maxHp={room.config.startingHp}
+                              variant="green"
+                            />
+                            {specHitA && specFeedback && (
+                              <span className="floating-dmg-badge">-{specFeedback.damage} HP</span>
+                            )}
+                          </div>
+                          <span className="round-mark vs-pulse">VS</span>
+                          <div
+                            key={specHitB ? `sB-${specHitKey}` : "sB-idle"}
+                            className={`score-team score-team-relative ${specHitB ? "damage-hit-shake" : ""}`}
+                          >
+                            <strong>{specTeamB?.name ?? "Tim B"}</strong>
+                            <b>{spectatedMatch.hp[specBId] ?? room.config.startingHp} HP</b>
+                            <HpBar
+                              hp={spectatedMatch.hp[specBId] ?? room.config.startingHp}
+                              maxHp={room.config.startingHp}
+                              variant="orange"
+                            />
+                            {specHitB && specFeedback && (
+                              <span className="floating-dmg-badge">-{specFeedback.damage} HP</span>
+                            )}
+                          </div>
+                        </div>
+
+                        {spectatedMatch.phase === "countdown" && (
+                          <div className="spectator-mini-countdown">
+                            <span className="countdown-kicker">Bersiap di Arena</span>
+                            <div className="spectator-mini-num" key={specCountdownText}>
+                              {specCountdownText}
+                            </div>
+                          </div>
+                        )}
+
+                        {spectatedMatch.question && spectatedMatch.phase !== "countdown" && (
+                          <div className="spectator-live-question" key={spectatedMatch.question.id}>
+                            <div
+                              className={`phase-banner ${
+                                spectatedMatch.status === "paused" ? "paused" : spectatedMatch.phase ?? ""
+                              }`}
+                            >
+                              <span>
+                                {spectatedMatch.status === "paused"
+                                  ? "DIJEDA"
+                                  : spectatedMatch.phase === "reading"
+                                  ? "WAKTU BACA"
+                                  : spectatedMatch.phase === "answering"
+                                  ? "REBUTAN JAWABAN"
+                                  : "TERKUNCI"}
+                              </span>
+                              <span className="phase-clock">
+                                {spectatedMatch.status === "paused" || spectatedMatch.status === "question"
+                                  ? `${remaining} dtk`
+                                  : "—"}
+                              </span>
+                            </div>
+
+                            <div
+                              className={`phase-track ${
+                                spectatedMatch.phase === "answering" ? "answering" : ""
+                              } ${remaining <= 2 && spectatedMatch.status === "question" ? "low" : ""}`}
+                            >
+                              <span style={{ width: `${specProgress}%` }} />
+                            </div>
+
+                            <h2 className="spectator-q-text" dir="auto">
+                              {spectatedMatch.question.text}
+                            </h2>
+
+                            <div className="spectator-mini-cards">
+                              {CARD_LETTERS.map((letter, idx) => {
+                                const isPicked = specFeedback?.card === letter;
+                                const stateClass = specFeedback
+                                  ? isPicked
+                                    ? specFeedback.correct
+                                      ? "answer-picked-correct"
+                                      : "answer-picked-wrong"
+                                    : "answer-dimmed"
+                                  : "";
+                                return (
+                                  <div key={letter} className={`spectator-mini-card ${stateClass}`}>
+                                    <span className="answer-letter">{letter}</span>
+                                    <span className="spectator-mini-opt" dir="auto">
+                                      {spectatedMatch.question!.options[idx]}
+                                    </span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+
+                        <DamagePopup feedback={specFeedback} teams={room.teams} />
+                      </>
+                    );
+                  })()}
+                </div>
+              ) : (
+                <div className="spectator-waiting-round">
+                  <h3>Menyiapkan Ronde Berikutnya…</h3>
+                  <p className="micro">Pertandingan ronde berikutnya akan segera dimulai.</p>
+                </div>
               )}
             </section>
           )}
 
-          {room.status === "running" && isParticipantInMatch && myMatch?.status === "finished" && (
-            <section className="panel waiting">
-              <span className="eyebrow">Pertandingan Ronde {room.currentRound} Selesai</span>
-              <h2>{myMatch.winnerTeamId === team?.id ? "Tim kamu menang ronde ini!" : "Pertandingan berakhir"}</h2>
-              <p className="micro">Menunggu pertandingan lain di ronde ini selesai untuk lanjut ke ronde berikutnya…</p>
+          {room.status === "finished" && (
+            <section className="panel player-finished-stage">
+              <div className="confetti-layer" aria-hidden="true">
+                {PLAYER_CONFETTI.map((item) => (
+                  <span
+                    key={item.id}
+                    className="confetti-piece"
+                    style={{
+                      left: item.left,
+                      background: item.color,
+                      animationDelay: item.delay,
+                      animationDuration: item.duration,
+                    }}
+                  />
+                ))}
+              </div>
+              <span className="trophy-badge small" aria-hidden="true">🏆</span>
+              <span className="eyebrow">Turnamen Selesai</span>
+              <h2>
+                {room.championTeamId === team?.id
+                  ? "Tim kamu juara turnamen!"
+                  : `Pemenang: ${room.teams.find((item) => item.id === room.championTeamId)?.name ?? "Tim Pemenang"}`}
+              </h2>
+              <div className="player-summary-grid">
+                <div className="summary-stat">
+                  <small>Total Damage</small>
+                  <strong>{myStats.damageDealt} DMG</strong>
+                </div>
+                <div className="summary-stat">
+                  <small>Jawaban Benar</small>
+                  <strong>{myStats.correctAnswers} Soal</strong>
+                </div>
+                <div className="summary-stat">
+                  <small>Kecepatan Rata2</small>
+                  <strong>{myAvgSec === "—" ? "—" : `${myAvgSec} dtk`}</strong>
+                </div>
+                <div className="summary-stat">
+                  <small>Peringkat MVP</small>
+                  <strong>{myRank > 0 ? `#${myRank}` : "—"}</strong>
+                </div>
+              </div>
+              <div className="btn-row" style={{ justifyContent: "center", marginTop: 12 }}>
+                <button type="button" className="button" onClick={() => setTeamModalOpen(true)}>
+                  Buka Papan Skor & Bracket
+                </button>
+                <Link className="button secondary" href="/">
+                  Kembali ke Beranda
+                </Link>
+              </div>
             </section>
           )}
 

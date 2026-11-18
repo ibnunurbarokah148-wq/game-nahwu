@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
-import type { AnswerFeedback, BracketRound, LeaderboardEntry, Player, Team } from "@/lib/game";
+import { useEffect, useMemo, useState } from "react";
+import type { AnswerFeedback, BracketRound, LeaderboardEntry, MatchView, Player, Team } from "@/lib/game";
+import { encodeQrMatrix } from "@/lib/qr";
 
 export function HpBar({
   hp,
@@ -14,15 +15,17 @@ export function HpBar({
   variant?: "green" | "orange";
 }) {
   const pct = Math.max(0, Math.min(100, (hp / Math.max(1, maxHp)) * 100));
+  const lowHp = pct > 0 && pct <= 25;
   return (
-    <div className="hp-track" role="progressbar" aria-valuenow={hp} aria-valuemin={0} aria-valuemax={maxHp}>
-      <span
-        style={{
-          width: `${pct}%`,
-          background: variant === "orange" ? "#b85b37" : "var(--green)",
-          marginLeft: variant === "orange" ? "auto" : undefined,
-        }}
-      />
+    <div
+      className={`hp-track ${lowHp ? "low-hp" : ""} ${variant === "orange" ? "orange" : ""}`}
+      role="progressbar"
+      aria-valuenow={hp}
+      aria-valuemin={0}
+      aria-valuemax={maxHp}
+    >
+      <span className="hp-trail" style={{ width: `${pct}%` }} />
+      <span className="hp-fill" style={{ width: `${pct}%` }} />
     </div>
   );
 }
@@ -36,15 +39,28 @@ export function DamagePopup({
 }) {
   if (!feedback) return null;
   const targetName = teams.find((team) => team.id === feedback.targetTeamId)?.name ?? "Tim";
+  const isFast = typeof feedback.responseMs === "number" && feedback.responseMs <= 1800;
   return (
-    <div className={`feedback ${feedback.correct ? "" : "wrong"}`} role="status" style={{ marginTop: 14 }}>
-      <strong>{feedback.playerName}</strong> mengangkat kartu <b>{feedback.card}</b> ·{" "}
-      {feedback.correct
-        ? `${feedback.damage} damage ke ${targetName}.`
-        : `Kurang tepat. ${targetName} kehilangan ${feedback.damage} HP.`}
-      {typeof feedback.responseMs === "number" && (
-        <span className="micro"> ({(feedback.responseMs / 1000).toFixed(1)} dtk)</span>
-      )}
+    <div className={`feedback feedback-animated ${feedback.correct ? "" : "wrong"}`} role="status" style={{ marginTop: 14 }}>
+      <div className="feedback-head">
+        <span className={`impact-badge ${feedback.correct ? "hit" : "self"}`}>
+          {feedback.correct ? "⚡ SERANGAN MASUK" : "💥 SENJATA MAKAN TUAN"}
+        </span>
+        <span className="dmg-chip">-{feedback.damage} HP</span>
+      </div>
+      <div className="feedback-body">
+        <strong>{feedback.playerName}</strong> mengangkat kartu{" "}
+        <span className="picked-card-pill">{feedback.card}</span> ·{" "}
+        {feedback.correct
+          ? `${feedback.damage} damage ke ${targetName}.`
+          : `Kurang tepat. ${targetName} kehilangan ${feedback.damage} HP.`}
+        {typeof feedback.responseMs === "number" && (
+          <span className="response-badges">
+            <span className="time-chip">{(feedback.responseMs / 1000).toFixed(1)} dtk</span>
+            {isFast && feedback.correct && <span className="fast-chip">⚡ BONUS CEPAT</span>}
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -55,12 +71,20 @@ export function TeamPanel({
   championTeamId,
   highlightTeamId,
   selfPlayerId,
+  matches,
+  maxHp,
+  byeTeamId,
+  onSelectMatch,
 }: {
   teams: Team[];
   players: Player[];
   championTeamId?: string;
   highlightTeamId?: string;
   selfPlayerId?: string;
+  matches?: MatchView[];
+  maxHp?: number;
+  byeTeamId?: string;
+  onSelectMatch?: (matchId: string, round?: number) => void;
 }) {
   if (teams.length === 0) return null;
   return (
@@ -68,6 +92,20 @@ export function TeamPanel({
       {teams.map((team) => {
         const isChampion = championTeamId === team.id;
         const isMine = highlightTeamId === team.id;
+        const isBye = byeTeamId === team.id;
+        const teamMatch = matches?.find((match) => match.teamIds.includes(team.id));
+        const opponentId = teamMatch?.teamIds.find((id) => id !== team.id);
+        const opponentName = teams.find((candidate) => candidate.id === opponentId)?.name;
+        const teamHp = teamMatch?.hp[team.id];
+        const wonRound = teamMatch?.winnerTeamId === team.id;
+        const teamMembers = team.playerIds
+          .map((playerId) => players.find((item) => item.id === playerId))
+          .filter((item): item is Player => Boolean(item));
+        const totalTeamDmg = teamMembers.reduce(
+          (sum, member) => sum + (member.stats?.damageDealt ?? 0),
+          0
+        );
+
         return (
           <div
             className={`team-box ${isChampion ? "champion-box" : ""} ${isMine ? "my-team-box" : ""}`}
@@ -78,21 +116,61 @@ export function TeamPanel({
               <span className="btn-row" style={{ gap: 5 }}>
                 {isMine && <span className="badge-pill mine">Tim Kamu</span>}
                 {isChampion && <span className="badge-pill">Juara</span>}
+                {!isChampion && isBye && <span className="badge-pill">BYE</span>}
+                {!isChampion && wonRound && <span className="badge-pill">Menang Ronde</span>}
+                {typeof teamHp === "number" && (
+                  <span className="team-hp-chip">♥ {teamHp} HP</span>
+                )}
               </span>
             </h3>
-            {team.playerIds.map((playerId) => {
-              const player = players.find((item) => item.id === playerId);
-              if (!player) return null;
+
+            {typeof teamHp === "number" && typeof maxHp === "number" && (
+              <div style={{ marginBottom: 10 }}>
+                <HpBar hp={teamHp} maxHp={maxHp} variant="green" />
+              </div>
+            )}
+
+            <div className="team-stat-line">
+              <span>
+                {teamMembers.length} anggota
+                {opponentName ? ` · vs ${opponentName}` : ""}
+              </span>
+              <span className="btn-row" style={{ gap: 6 }}>
+                <span>Total {totalTeamDmg} DMG</span>
+                {teamMatch && onSelectMatch && (
+                  <button
+                    type="button"
+                    className="mini-link-btn"
+                    onClick={() => onSelectMatch(teamMatch.id, teamMatch.round)}
+                  >
+                    Lihat laga →
+                  </button>
+                )}
+              </span>
+            </div>
+
+            {teamMembers.map((player) => {
               const isSelf = player.id === selfPlayerId;
+              const stats = player.stats;
               return (
-                <div className={`team-player ${isSelf ? "self-player" : ""}`} key={playerId}>
+                <div className={`team-player ${isSelf ? "self-player" : ""}`} key={player.id}>
                   <span className="avatar">{player.avatar}</span>
                   <span className="player-meta">
                     <strong>
                       {player.name} {isSelf && <span className="self-tag">Kamu</span>}
                     </strong>
-                    {!player.connected && <small>Terputus sementara · kartu dioper ke tim</small>}
+                    {!player.connected && (
+                      <small>Terputus sementara · kartu dioper ke tim</small>
+                    )}
                   </span>
+                  {stats && (
+                    <span className="member-stat-pill">
+                      <b>{stats.damageDealt} DMG</b>
+                      <small>
+                        {stats.correctAnswers}B / {stats.wrongAnswers}S
+                      </small>
+                    </span>
+                  )}
                 </div>
               );
             })}
@@ -108,11 +186,13 @@ export function Bracket({
   teams,
   maxHp,
   championTeamId,
+  onSelectMatch,
 }: {
   bracket?: BracketRound[];
   teams: Team[];
   maxHp: number;
   championTeamId?: string;
+  onSelectMatch?: (matchId: string, round?: number) => void;
 }) {
   if (!bracket || bracket.length === 0) return null;
   const teamName = (id?: string) => teams.find((team) => team.id === id)?.name ?? id ?? "Menunggu";
@@ -131,7 +211,10 @@ export function Bracket({
               const hpA = match.hp[teamA] ?? maxHp;
               const hpB = match.hp[teamB] ?? maxHp;
               return (
-                <div className="bracket-match-card" key={match.id}>
+                <div
+                  className={`bracket-match-card ${onSelectMatch ? "clickable" : ""}`}
+                  key={match.id}
+                >
                   <div className="question-top" style={{ fontSize: 11, marginBottom: 8 }}>
                     <span>
                       {match.tieBreaker
@@ -142,7 +225,18 @@ export function Bracket({
                         ? "DIJEDA"
                         : "BERLANGSUNG"}
                     </span>
-                    {match.winnerTeamId && <span>PEMENANG: {teamName(match.winnerTeamId)}</span>}
+                    <span className="btn-row" style={{ gap: 6 }}>
+                      {match.winnerTeamId && <span>PEMENANG: {teamName(match.winnerTeamId)}</span>}
+                      {onSelectMatch && (
+                        <button
+                          type="button"
+                          className="mini-link-btn"
+                          onClick={() => onSelectMatch(match.id, round.round)}
+                        >
+                          Lihat →
+                        </button>
+                      )}
+                    </span>
                   </div>
                   <div className="bracket-vs-row">
                     <div className={`bracket-team-pill ${match.winnerTeamId === teamA ? "winner" : ""}`}>
@@ -213,38 +307,44 @@ export function Leaderboard({ entries }: { entries?: LeaderboardEntry[] }) {
 export function JoinShareBox({ code, roomId }: { code: string; roomId: string }) {
   const [copiedLink, setCopiedLink] = useState(false);
   const joinPath = `/join/${code}`;
+  const [joinUrl, setJoinUrl] = useState(joinPath);
+
+  useEffect(() => {
+    setJoinUrl(`${window.location.origin}${joinPath}`);
+  }, [joinPath]);
 
   async function copyJoinLink() {
-    const url = typeof window !== "undefined" ? `${window.location.origin}${joinPath}` : joinPath;
-    await navigator.clipboard.writeText(url);
+    await navigator.clipboard.writeText(joinUrl);
     setCopiedLink(true);
     setTimeout(() => setCopiedLink(false), 1600);
   }
 
-  const cells = Array.from({ length: 81 }, (_, idx) => {
-    const row = Math.floor(idx / 9);
-    const col = idx % 9;
-    const isCorner = (row < 3 && col < 3) || (row < 3 && col > 5) || (row > 5 && col < 3);
-    if (isCorner) return true;
-    const charCode = code.charCodeAt((row * 9 + col) % code.length) || 65;
-    return ((charCode + row * 7 + col * 13) % 3) !== 0;
-  });
+  const matrix = useMemo(() => encodeQrMatrix(joinUrl), [joinUrl]);
+  const qrSize = matrix.length;
 
   return (
     <div className="panel join-share-box">
-      <div className="qr-badge" aria-label={`Kode visual room ${code}`}>
-        <div className="qr-grid">
-          {cells.map((filled, idx) => (
-            <span key={idx} className={filled ? "qr-dot on" : "qr-dot"} />
-          ))}
-        </div>
+      <div className="qr-badge" aria-label={`Kode QR bergabung ke room ${code}`}>
+        <svg
+          className="qr-svg"
+          viewBox={`-2 -2 ${qrSize + 4} ${qrSize + 4}`}
+          role="img"
+          aria-label={`QR Code untuk ${joinPath}`}
+        >
+          <rect x={-2} y={-2} width={qrSize + 4} height={qrSize + 4} fill="#ffffff" rx={1.5} />
+          {matrix.map((row, r) =>
+            row.map((dark, c) =>
+              dark ? <rect key={`${r}-${c}`} x={c} y={r} width={1} height={1} fill="#17221b" /> : null
+            )
+          )}
+        </svg>
         <small className="micro">{joinPath}</small>
       </div>
       <div className="join-share-actions">
         <span className="eyebrow">Kode Masuk Room</span>
         <div className="big-code" style={{ margin: "4px 0 6px" }}>{code}</div>
         <p className="micro" style={{ marginBottom: 14 }}>
-          Masukkan kode 6 karakter di halaman utama atau bagikan tautan langsung kepada pemain.
+          Scan QR atau masukkan kode 6 karakter di halaman utama untuk bergabung.
         </p>
         <div className="btn-row">
           <button type="button" className="button secondary" onClick={copyJoinLink}>

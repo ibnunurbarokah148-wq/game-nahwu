@@ -6,6 +6,8 @@ import { useState } from "react";
 import { Brand } from "@/components/brand";
 import { getSocket } from "@/lib/socket";
 
+const AVATARS = ["🦊", "🐼", "🦉", "🐯", "🐸", "🐙", "🦁", "🐨"];
+
 export default function HomePage() {
   const router = useRouter();
   const [code, setCode] = useState("");
@@ -61,7 +63,22 @@ export default function HomePage() {
           <p className="micro">Minta kode 6 karakter dari host untuk mulai bermain.</p>
           <div className="field"><label htmlFor="room-code">Kode room</label><input id="room-code" className="input code" autoComplete="off" maxLength={6} value={code} onChange={(event) => setCode(event.target.value.toUpperCase())} placeholder="MIS. KARTU7" required /></div>
           <div className="field"><label htmlFor="player-name">Nama panggilan</label><input id="player-name" className="input" autoComplete="nickname" maxLength={20} value={name} onChange={(event) => setName(event.target.value)} placeholder="Nama yang terlihat di tim" required /></div>
-          <div className="field"><label htmlFor="player-avatar">Avatar</label><select id="player-avatar" className="input" value={avatar} onChange={(event) => setAvatar(event.target.value)}><option>🦊</option><option>🐼</option><option>🦉</option><option>🐯</option><option>🐸</option><option>🐙</option><option>🦁</option><option>🐨</option></select></div>
+          <div className="field">
+            <label>Pilih Avatar</label>
+            <div className="avatar-picker">
+              {AVATARS.map((item) => (
+                <button
+                  key={item}
+                  type="button"
+                  className={`avatar-option ${avatar === item ? "selected" : ""}`}
+                  onClick={() => setAvatar(item)}
+                  aria-pressed={avatar === item}
+                >
+                  {item}
+                </button>
+              ))}
+            </div>
+          </div>
           <button className="button full" type="submit" disabled={busy}>{busy ? "Menghubungkan…" : "Gabung room"}</button>
           {error && <p role="alert" className="error">{error}</p>}
         </form>

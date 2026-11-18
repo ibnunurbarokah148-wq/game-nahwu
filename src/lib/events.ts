@@ -19,5 +19,6 @@ export type ClientToServerEvents = {
 export type ServerToClientEvents = {
   "room:update": (snapshot: RoomSnapshot) => void;
   "player:cards": (cards: CardLetter[]) => void;
+  "player:kicked": (message: string) => void;
   "room:error": (message: string) => void;
 };

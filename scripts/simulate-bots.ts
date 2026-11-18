@@ -48,6 +48,7 @@ async function main() {
     let myCards: CardLetter[] = [];
     let myPlayerId = "";
     let myRoomId = "";
+    let lastAnsweredKey = "";
 
     socket.on("connect", () => {
       socket.emit(
@@ -74,9 +75,21 @@ async function main() {
       const me = snapshot.players.find((p) => p.id === myPlayerId);
       if (!me?.teamId) return;
       const activeMatch = snapshot.matches?.find((m) => m.teamIds.includes(me.teamId!)) ?? snapshot.match;
-      if (!activeMatch || activeMatch.status !== "question" || !activeMatch.question || myCards.length === 0) return;
+      if (
+        !activeMatch ||
+        activeMatch.status !== "question" ||
+        activeMatch.phase !== "answering" ||
+        !activeMatch.question ||
+        myCards.length === 0
+      ) {
+        return;
+      }
 
-      const delay = 1200 + Math.floor(Math.random() * 4500);
+      const key = `${activeMatch.id}:${activeMatch.question.number}`;
+      if (lastAnsweredKey === key) return;
+      lastAnsweredKey = key;
+
+      const delay = 450 + Math.floor(Math.random() * 3200);
       const questionId = activeMatch.question.id;
       const matchId = activeMatch.id;
       const chosenCard = myCards[Math.floor(Math.random() * myCards.length)];

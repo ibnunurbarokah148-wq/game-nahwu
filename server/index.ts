@@ -46,6 +46,7 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents>(httpServer, {
 type MatchState = MatchView & {
   questionIndex: number;
   questionStartedAt: number;
+  elapsedBeforePauseMs?: number;
   pausedRemainingMs?: number;
   questionTimer?: NodeJS.Timeout;
   readingTimer?: NodeJS.Timeout;
@@ -62,6 +63,7 @@ type RoomState = RoomSnapshot & {
   roundAdvanceTimer?: NodeJS.Timeout;
   usedByes: Set<string>;
   hostToken: string;
+  nextQuestionIndex: number;
 };
 
 const rooms = new Map<string, RoomState>();
@@ -160,7 +162,12 @@ function emitTeamCards(room: RoomState, targetTeamId?: string): void {
   }
 }
 
-function buildMatch(room: RoomState, teamIds: [string, string], round: number): MatchState {
+function buildMatch(
+  room: RoomState,
+  teamIds: [string, string],
+  round: number,
+  startQuestionIndex: number
+): MatchState {
   const id = randomUUID();
   return {
     id,
@@ -169,7 +176,7 @@ function buildMatch(room: RoomState, teamIds: [string, string], round: number): 
     hp: { [teamIds[0]]: room.config.startingHp, [teamIds[1]]: room.config.startingHp },
     questionNumber: 0,
     status: "waiting",
-    questionIndex: (round - 1) * room.config.questionsPerMatch,
+    questionIndex: startQuestionIndex,
     questionStartedAt: 0,
     submissions: new Set(),
     tieBreaker: false,
@@ -202,6 +209,7 @@ function startMatchCountdown(room: RoomState, match: MatchState): void {
   match.countdownEndsAt = Date.now() + MATCH_COUNTDOWN_MS;
   match.question = undefined;
   match.questionNumber = 0;
+  match.elapsedBeforePauseMs = undefined;
   match.paused = false;
   match.pausedRemainingMs = undefined;
   match.feedback = undefined;
@@ -248,6 +256,7 @@ function showQuestion(room: RoomState, match: MatchState): void {
   const endsAt = readEndsAt + answerMs;
   match.questionNumber += 1;
   match.questionStartedAt = readEndsAt;
+  match.elapsedBeforePauseMs = undefined;
   match.paused = false;
   match.pausedRemainingMs = undefined;
   match.status = "question";
@@ -311,8 +320,12 @@ function finishMatch(room: RoomState, match: MatchState, winnerTeamId?: string):
 
 function advanceMatch(room: RoomState, match: MatchState): void {
   if (match.status === "finished" || match.status === "question" || match.status === "paused") return;
+  const [firstId, secondId] = match.teamIds;
+  if (match.hp[firstId] <= 0 || match.hp[secondId] <= 0) {
+    finishMatch(room, match, match.hp[firstId] > match.hp[secondId] ? firstId : secondId);
+    return;
+  }
   if (match.questionNumber >= room.config.questionsPerMatch) {
-    const [firstId, secondId] = match.teamIds;
     const firstHp = match.hp[firstId];
     const secondHp = match.hp[secondId];
     if (firstHp !== secondHp) {
@@ -320,7 +333,13 @@ function advanceMatch(room: RoomState, match: MatchState): void {
       return;
     }
     if (match.tieBreaker && match.tieBreakerCount >= 2) {
-      finishMatch(room, match, firstId);
+      const teamDamage = (teamId: string) =>
+        room.players
+          .filter((player) => player.teamId === teamId)
+          .reduce((sum, player) => sum + (player.stats?.damageDealt ?? 0), 0);
+      const firstDmg = teamDamage(firstId);
+      const secondDmg = teamDamage(secondId);
+      finishMatch(room, match, secondDmg > firstDmg ? secondId : firstId);
       return;
     }
     match.tieBreaker = true;
@@ -332,6 +351,18 @@ function advanceMatch(room: RoomState, match: MatchState): void {
 
 function startTournamentRound(room: RoomState, teamIds: string[], roundNumber: number): void {
   room.currentRound = roundNumber;
+  if (roundNumber === 1) {
+    room.nextQuestionIndex = 0;
+  } else {
+    const maxUsedIndex = room.activeMatches.reduce(
+      (max, match) => Math.max(max, match.questionIndex + 1),
+      0
+    );
+    room.nextQuestionIndex = Math.max(
+      room.nextQuestionIndex + room.config.questionsPerMatch,
+      maxUsedIndex
+    );
+  }
   const activeTeams = teamIds
     .map((id) => room.teams.find((team) => team.id === id))
     .filter((team): team is Team => Boolean(team));
@@ -352,7 +383,7 @@ function startTournamentRound(room: RoomState, teamIds: string[], roundNumber: n
     byeTeamId = pairing.byeTeamId;
   }
 
-  room.activeMatches = pairs.map((pair) => buildMatch(room, pair, roundNumber));
+  room.activeMatches = pairs.map((pair) => buildMatch(room, pair, roundNumber, room.nextQuestionIndex));
   if (!room.bracket) room.bracket = [];
   room.bracket.push({
     round: roundNumber,
@@ -395,6 +426,7 @@ io.on("connection", (socket) => {
       activeMatches: [],
       bracket: [],
       usedByes: new Set(),
+      nextQuestionIndex: 0,
     };
     rooms.set(roomId, room);
     socket.join(roomId);
@@ -443,6 +475,10 @@ io.on("connection", (socket) => {
       room.players.push(player);
     } else {
       player.connected = true;
+      if (room.status === "lobby") {
+        player.name = nameResult.data;
+        player.avatar = avatarResult.data;
+      }
     }
     const previousSocketId = playerSockets.get(player.id);
     if (previousSocketId && previousSocketId !== socket.id) {
@@ -539,9 +575,16 @@ io.on("connection", (socket) => {
     }
     room.players = room.players.filter((player) => player.id !== playerId);
     playerSessions.delete(playerId);
+    playerSockets.delete(playerId);
     for (const [socketId, joinedPlayerId] of socketPlayers) {
       if (joinedPlayerId === playerId) {
-        io.sockets.sockets.get(socketId)?.leave(roomId);
+        const targetSocket = io.sockets.sockets.get(socketId);
+        targetSocket?.emit("player:kicked", "Kamu telah dikeluarkan dari room oleh host.");
+        if (targetSocket) {
+          targetSocket.data.playerId = undefined;
+          targetSocket.data.roomId = undefined;
+          targetSocket.leave(roomId);
+        }
         socketPlayers.delete(socketId);
       }
     }
@@ -566,6 +609,7 @@ io.on("connection", (socket) => {
     room.status = "running";
     room.bracket = [];
     room.usedByes = new Set();
+    room.nextQuestionIndex = 0;
     startTournamentRound(
       room,
       room.teams.map((team) => team.id),
@@ -580,24 +624,41 @@ io.on("connection", (socket) => {
       return reply({ error: "Pertandingan tidak dapat dijeda." });
     }
     const targets = matchId
-      ? room.activeMatches.filter((match) => match.id === matchId)
-      : room.activeMatches.filter((match) => match.status === "question" || match.status === "paused");
+      ? room.activeMatches.filter((match) => match.id === matchId && match.status !== "finished")
+      : room.activeMatches.filter(
+          (match) => match.status === "question" || match.status === "paused" || match.status === "locked"
+        );
     if (targets.length === 0) {
       return reply({ error: "Tidak ada soal aktif untuk dijeda." });
     }
 
-    const shouldPause = targets.some((match) => match.status === "question");
+    const shouldPause = !targets.some((match) => match.status === "paused");
     for (const match of targets) {
-      if (shouldPause && match.status === "question") {
+      if (shouldPause && match.status !== "paused") {
         const now = Date.now();
-        const remainingMs = Math.max(
-          500,
-          match.phase === "countdown"
-            ? (match.countdownEndsAt ?? now) - now
-            : match.phase === "reading"
-            ? (match.question?.readEndsAt ?? now) - now
-            : (match.question?.endsAt ?? now) - now
-        );
+        if (match.phase === "answering") {
+          match.elapsedBeforePauseMs = Math.max(
+            0,
+            (match.elapsedBeforePauseMs ?? 0) + (now - match.questionStartedAt)
+          );
+        }
+        let remainingMs: number;
+        if (match.status === "locked") {
+          remainingMs = 800;
+          if (match.advanceTimer) {
+            clearTimeout(match.advanceTimer);
+            match.advanceTimer = undefined;
+          }
+        } else {
+          remainingMs = Math.max(
+            500,
+            match.phase === "countdown"
+              ? (match.countdownEndsAt ?? now) - now
+              : match.phase === "reading"
+              ? (match.question?.readEndsAt ?? now) - now
+              : (match.question?.endsAt ?? now) - now
+          );
+        }
         clearMatchTimers(match);
         match.paused = true;
         match.status = "paused";
@@ -612,27 +673,33 @@ io.on("connection", (socket) => {
         const now = Date.now();
         const remainingMs = match.pausedRemainingMs ?? room.config.questionSeconds * 1000;
         match.paused = false;
-        match.status = "question";
         match.pausedRemainingMs = undefined;
         if (match.question) {
           match.question = { ...match.question, pausedRemainingMs: undefined };
         }
-        if (match.phase === "countdown") {
-          match.countdownEndsAt = now + remainingMs;
-          scheduleCountdown(room, match, remainingMs);
-        } else if (match.phase === "reading" && match.question) {
-          const readEndsAt = now + remainingMs;
-          match.question = {
-            ...match.question,
-            readEndsAt,
-            endsAt: readEndsAt + room.config.questionSeconds * 1000,
-          };
-          match.questionStartedAt = readEndsAt;
-          scheduleReading(room, match, remainingMs);
-        } else if (match.phase === "answering" && match.question) {
-          match.question = { ...match.question, endsAt: now + remainingMs };
-          match.questionStartedAt = now;
-          scheduleQuestionTimeout(room, match, remainingMs);
+        if (match.phase === "locked") {
+          match.status = "locked";
+          if (match.advanceTimer) clearTimeout(match.advanceTimer);
+          match.advanceTimer = setTimeout(() => advanceMatch(room, match), remainingMs);
+        } else {
+          match.status = "question";
+          if (match.phase === "countdown") {
+            match.countdownEndsAt = now + remainingMs;
+            scheduleCountdown(room, match, remainingMs);
+          } else if (match.phase === "reading" && match.question) {
+            const readEndsAt = now + remainingMs;
+            match.question = {
+              ...match.question,
+              readEndsAt,
+              endsAt: readEndsAt + room.config.questionSeconds * 1000,
+            };
+            match.questionStartedAt = readEndsAt;
+            scheduleReading(room, match, remainingMs);
+          } else if (match.phase === "answering" && match.question) {
+            match.question = { ...match.question, endsAt: now + remainingMs };
+            match.questionStartedAt = now - (match.elapsedBeforePauseMs ?? 0);
+            scheduleQuestionTimeout(room, match, remainingMs);
+          }
         }
       }
     }
@@ -744,10 +811,14 @@ io.on("connection", (socket) => {
       responseMs: elapsedMs,
     } satisfies AnswerFeedback;
 
-    if (match.tieBreaker && correct) {
-      finishMatch(room, match, player.teamId);
-    } else if (match.hp[targetTeamId] === 0) {
-      finishMatch(room, match, match.teamIds.find((teamId) => teamId !== targetTeamId));
+    if ((match.tieBreaker && correct) || match.hp[targetTeamId] === 0) {
+      const winningTeamId =
+        match.tieBreaker && correct
+          ? player.teamId
+          : match.teamIds.find((teamId) => teamId !== targetTeamId);
+      publish(room);
+      if (match.advanceTimer) clearTimeout(match.advanceTimer);
+      match.advanceTimer = setTimeout(() => finishMatch(room, match, winningTeamId), 1800);
     } else {
       publish(room);
       if (match.advanceTimer) clearTimeout(match.advanceTimer);
